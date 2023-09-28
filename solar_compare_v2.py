@@ -275,52 +275,175 @@ if options[-1]["import"] != "contract":
 # %%
 
 
-for o in options:
-    df[f"cost_{o['import']}_{o['export']}"] = (
-        df["import"] * df[f"import_{o['import']}_unit"]
-        + df[f"import_{o['import']}_standing"] / 48
-        - df["export"] * df[f"export_{o['export']}_unit"]
-    ) / 100
+# for o in options:
+#     df[f"cost_{o['import']}_{o['export']}"] = (
+#         df["import"] * df[f"import_{o['import']}_unit"]
+#         + df[f"import_{o['import']}_standing"] / 48
+#         - df["export"] * df[f"export_{o['export']}_unit"]
+#     ) / 100
+# # # %%
+
+# fig, ax = plt.subplots(2, 2, figsize=(12, 8))
+# ax = ax.flatten()
+# start = pd.Timestamp("2023-01-01").tz_localize("UTC")
+# end = pd.Timestamp.now().tz_localize("UTC")
+
+# dfx = df.loc[(df.index >= start) & (df.index <= end)]
+
+# for o in options:
+#     print(o)
+#     (dfx[f"cost_{o['import']}_{o['export']}"].resample(interval).mean().iloc[:-1] * 48).plot(
+#         ax=ax[0], color=o["color"], label=f"{o['import']}/{o['export']}"
+#     )
+#     dfx[f"cost_{o['import']}_{o['export']}"].cumsum().plot(ax=ax[1], c=o["color"], label=f"{o['import']}/{o['export']}")
+#     mask = dfx[f"cost_{o['import']}_{o['export']}"].resample(interval).mean() == dfx[
+#         [f"cost_{o['import']}_{o['export']}" for o in options[:-1]]
+#     ].resample(interval).mean().min(axis=1)
+#     if o["import"] != "contract":
+#         ax[3].scatter(
+#             dfx["export"].resample(interval).mean().iloc[:-1][mask] * 48,
+#             dfx["import"].resample(interval).mean().iloc[:-1][mask] * 48,
+#             c=o["color"],
+#             label=f"{o['import']}/{o['export']}",
+#         )
+
+# (dfx["import"].resample(interval).mean().iloc[:-1] * 48).plot(ax=ax[2])
+# (dfx["export"].resample(interval).mean().iloc[:-1] * 48).plot(ax=ax[2])
+
+# ax[3].set_xlabel("Mean Daily Export (kWh)")
+# ax[0].set_ylabel("Mean Daily Net Cost (GBP)")
+# ax[1].set_ylabel("Cumulative Net Cost (GBP)")
+# ax[2].set_ylabel("Mean Daily Import/Export (kWh)")
+# ax[3].set_ylabel("Mean Daily Import (kWh)")
+# ax[0].legend()
+# ax[3].legend()
+# ax[2].legend()
+# ax[3].set_title("Lowest Cost Tariff")
+# for i in range(3):
+#     ax[i].set_xlabel(None)
+
+#     # ax[1].legend()
+# %%
+from influxdb import InfluxDBClient
+
+entities = [
+    "inverter_ac",
+    "inverter_dc",
+    "battery_charge",
+    "battery_discharge",
+    "grid_import",
+    "grid_export",
+    "total_load",
+    # "house_load",
+    # "backup_load",
+]
+
+username = "homeassistant"
+password = "39v9X3c363gP"
+dbname = "homeassistant"
+
+client = InfluxDBClient("homeassistant.local", 8086, username, password, dbname)
+print(client)
+
+version = client.ping()  # check connection, print InfluxDB version number
+print("InfluxDB version {}".format(version))
+
+
+interval = pd.Timedelta(minutes=5)
+milliseconds = int(interval.total_seconds() * 1000)
+days = (pd.Timestamp.now(tz="UTC") - df.index[0]).days + 1
+resamp = "30T"
+
+ix = pd.DataFrame()
+
+for entity in entities:
+    qry = f'SELECT mean("value") AS "{entity}" FROM "homeassistant"."autogen"."sensor.solis_{entity}_power" WHERE time > now() - {days:d}d GROUP BY time({milliseconds:d}ms)'
+    ix = pd.concat([ix, pd.DataFrame(list(client.query(qry).get_points())).set_index("time")], axis=1)
+
+ix.index = pd.to_datetime(ix.index)
+# df=df.interpolate(method="ffill")
+
+ix = ix.resample(resamp).mean().iloc[:-1].fillna(0)
+ix *= 0.5e-3
+# %%
+qry = f'SELECT mean("value") AS soc FROM "homeassistant"."autogen"."sensor.solis_battery_soc" WHERE time > now() - {days:d}d GROUP BY time({milliseconds:d}ms)'
+ix2 = pd.DataFrame(list(client.query(qry).get_points())).set_index("time")
+ix2.index = pd.to_datetime(ix2.index)
+ix2 = ix2.resample(resamp).mean().iloc[:-1].interpolate()
+
+ix = pd.concat([ix, ix2], axis=1)
+
 # %%
 
-fig, ax = plt.subplots(2, 2, figsize=(12, 8))
-ax = ax.flatten()
-start = pd.Timestamp("2023-01-01").tz_localize("UTC")
-end = pd.Timestamp.now().tz_localize("UTC")
+dfx = pd.concat([df, ix.loc[df.index]], axis=1)
+dates = ["2023-06-10", "2023-08-01", "2023-09-27"]
+z = []
+for date in dates:
+    z.append(dfx.loc[date])
 
-dfx = df.loc[(df.index >= start) & (df.index <= end)]
 
-for o in options:
-    print(o)
-    (dfx[f"cost_{o['import']}_{o['export']}"].resample(interval).mean().iloc[:-1] * 48).plot(
-        ax=ax[0], color=o["color"], label=f"{o['import']}/{o['export']}"
-    )
-    dfx[f"cost_{o['import']}_{o['export']}"].cumsum().plot(ax=ax[1], c=o["color"], label=f"{o['import']}/{o['export']}")
-    mask = dfx[f"cost_{o['import']}_{o['export']}"].resample(interval).mean() == dfx[
-        [f"cost_{o['import']}_{o['export']}" for o in options[:-1]]
-    ].resample(interval).mean().min(axis=1)
-    if o["import"] != "contract":
-        ax[3].scatter(
-            dfx["export"].resample(interval).mean().iloc[:-1][mask] * 48,
-            dfx["import"].resample(interval).mean().iloc[:-1][mask] * 48,
-            c=o["color"],
-            label=f"{o['import']}/{o['export']}",
+# %%
+def calc_flows(
+    df,
+    soc="soc",
+    solar="inverter_dc",
+    consumption="total_load",
+    charge="battery_charge",
+    discharge="battery_discharge",
+    inverter_efficiency=0.97,
+    charger_efficiency=0.91,
+    capacity=10000,
+    max_dod=0.15,
+):
+    battery_flows = df[solar] - df[consumption]
+
+    chg = [(df[soc] + df[discharge] - df[charge]).iloc[0] / 100 * capacity]
+    for flow in battery_flows:
+        if flow < 0:
+            flow = flow / inverter_efficiency
+        else:
+            flow = flow * charger_efficiency_percent
+
+        chg.append(
+            round(
+                max(
+                    [
+                        min(
+                            [
+                                chg[-1] + flow,
+                                capacity,
+                            ]
+                        ),
+                        max_dod * capacity,
+                    ]
+                ),
+                1,
+            )
         )
 
-(dfx["import"].resample(interval).mean().iloc[:-1] * 48).plot(ax=ax[2])
-(dfx["export"].resample(interval).mean().iloc[:-1] * 48).plot(ax=ax[2])
+        df["calc_chg"] = chg[1:]
 
-ax[3].set_xlabel("Mean Daily Export (kWh)")
-ax[0].set_ylabel("Mean Daily Net Cost (GBP)")
-ax[1].set_ylabel("Cumulative Net Cost (GBP)")
-ax[2].set_ylabel("Mean Daily Import/Export (kWh)")
-ax[3].set_ylabel("Mean Daily Import (kWh)")
-ax[0].legend()
-ax[3].legend()
-ax[2].legend()
-ax[3].set_title("Lowest Cost Tariff")
-for i in range(3):
-    ax[i].set_xlabel(None)
+        df["calc_chg"].interpolate(method="ffill", inplace=True)
 
-    # ax[1].legend()
+        df["calc_battery_flow"] = (-pd.Series(chg).diff())[1:].to_list()
+
+        df.loc[df["calc_battery_flow"] > 0, "calc_battery_flow"] = df["calc_battery_flow"] * inverter_efficiency
+        df.loc[df["calc_battery_flow"] < 0, "calc_battery_flow"] = df["calc_battery_flow"] / charger_efficiency
+
+        df["calc_grid_flow"] = -(df[solar] - self.df[consumption] + self.df["calc_battery_flow"]).round(2)
+
+        # df["net_cost"] += (
+        #     (self.df["import"] * self.df["grid_flow"]).clip(0) / 100 / 1000 * self.freq * weights[source]
+        # )
+        # self.df["net_cost"] += (
+        #     (self.df["export"] * self.df["grid_flow"]).clip(upper=0) / 100 / 1000 * self.freq * weights[source]
+        # )
+
+        # self.df["forced_charge"] += forced_charge * weights[source]
+
+        df["calc_soc"] = df["calc_chg"] / capacity
+
+
+# %%
+calc_flows(z[0])
 # %%
